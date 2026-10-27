@@ -1,7 +1,16 @@
-﻿python/
+﻿# Тяжелые папки сборки (не заливаем на GitHub)
+python/
 db/
 Output/
+eskape_output/
+
+# Установщики и архивы (раздаем через GitHub Releases)
 *.exe
+*.zip
+*.7z
 *.iss
 setup.iss
-eskape_output/
+
+# Кэш Python
+__pycache__/
+*.pyc
