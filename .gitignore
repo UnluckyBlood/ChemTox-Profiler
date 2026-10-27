@@ -1,0 +1,7 @@
+﻿python/
+db/
+Output/
+*.exe
+*.iss
+setup.iss
+eskape_output/
