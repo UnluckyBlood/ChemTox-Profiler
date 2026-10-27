@@ -1,16 +1,31 @@
-﻿# Тяжелые папки сборки (не заливаем на GitHub)
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+eskape_env/
+.venv/
+
+# Тяжелые папки проекта (Python, Модели, Временные файлы)
 python/
 db/
-Output/
 eskape_output/
+eskape_temp/
+The-ESKAPE-Model-main/
 
-# Установщики и архивы (раздаем через GitHub Releases)
+# Скомпилированные установщики
+dist/
 *.exe
+
+# Пользовательские файлы
+*.log
 *.zip
 *.7z
-*.iss
-setup.iss
+*.png
+*.jpg
 
-# Кэш Python
-__pycache__/
-*.pyc
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
