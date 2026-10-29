@@ -25,7 +25,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def ld50_mgkg(log_molkg, mw): return (10 ** (-log_molkg)) * mw * 1000
+# Перевод LD50 из log(mol/kg) в мг/кг
+def ld50_mgkg(log_molkg, mw): 
+    return (10 ** (-log_molkg)) * mw * 1000
+
+# Определение класса опасности GHS
 def ghs_class(mg):
     if mg is None: return "—"
     if mg < 5: return "1 — смертельно"
@@ -34,12 +38,15 @@ def ghs_class(mg):
     if mg < 2000: return "4 — вредно"
     if mg < 5000: return "5 — малоопасно"
     return "> 5000 — нетоксично"
+
+# Определение цвета карточки по уровню токсичности
 def color_for(mg):
     if mg is None: return "gray"
     if mg < 300: return "red"
     if mg < 2000: return "yellow"
     return "green"
 
+# Генерация SVG-изображения молекулы
 def mol_svg(mol, w=340, h=340):
     d = rdMolDraw2D.MolDraw2DSVG(w, h)
     rdMolDraw2D.PrepareAndDrawMolecule(d, mol)
@@ -47,6 +54,7 @@ def mol_svg(mol, w=340, h=340):
     b64 = base64.b64encode(d.GetDrawingText().encode()).decode()
     return f'<div style="background:#fff;padding:10px;border-radius:10px;text-align:center"><img src="data:image/svg+xml;base64,{b64}" width="{w}"/></div>'
 
+# Прогноз токсичности через ADMET-AI
 def run_admet(smiles):
     try:
         from admet_ai import ADMETModel
@@ -56,8 +64,10 @@ def run_admet(smiles):
         for l, k in keys.items():
             if isinstance(p, dict) and k in p: out[l] = float(p[k])
         return out
-    except Exception as e: return {"error": str(e)}
+    except Exception as e: 
+        return {"error": str(e)}
 
+# Прогноз антибактериальной активности (Random Forest)
 def run_eskape(smiles):
     csv_in = ESKAPE_DIR / "input.csv"
     pd.DataFrame({"smiles": [smiles]}).to_csv(csv_in, index=False)
@@ -89,6 +99,7 @@ def run_eskape(smiles):
 
     return {"input.csv": {smiles: results}}, None
 
+# Поиск противогрибковых SMARTS-паттернов
 def antifungal(mol):
     out = []
     if mol.HasSubstructMatch(Chem.MolFromSmarts("n1cncc1")): out.append("Азольное кольцо")
@@ -97,14 +108,14 @@ def antifungal(mol):
     return out
 
 with st.sidebar:
-    st.header("🧪 Ввод")
+    st.header("Ввод")
     smiles_in = st.text_area("SMILES", "CN(C)CCCN(CCCN(C)C)C(=O)C(Cc1ccccc1)NC(=O)C12CC3CC(CC(C3)C1)C2", height=90)
-    with st.expander("📋 Справочные LD50 (вручную)"):
+    with st.expander("Справочные LD50 (вручную)"):
         ref_oral = st.number_input("Перорально, мг/кг", min_value=0.0, value=0.0)
         ref_ip = st.number_input("i.p., мг/кг", min_value=0.0, value=0.0)
-        calc_ip = st.checkbox("Рассчитать i.p. из oral (×0.33)", value=True)
+        calc_ip = st.checkbox("Рассчитать i.p. из oral (x0.33)", value=True)
     
-    calc_btn = st.button("🚀 Рассчитать всё", type="primary", use_container_width=True)
+    calc_btn = st.button("Рассчитать всё", type="primary", use_container_width=True)
 
 if not smiles_in or not smiles_in.strip():
     st.info("Введите SMILES слева."); st.stop()
@@ -128,7 +139,7 @@ if calc_btn:
         st.session_state['esk'] = esk_data
         st.session_state['esk_err'] = esk_err
         if esk_data:
-            status.update(label="Готово!", state="complete", expanded=False)
+            status.update(label="Готово", state="complete", expanded=False)
         else:
             status.update(label="Ошибка ESKAPE", state="error")
     st.rerun()
@@ -147,7 +158,7 @@ if esk:
     esk_merged = {p: sum(vs)/len(vs) for p, vs in esk_merged.items()}
 
 desc = {"MW": round(Descriptors.MolWt(mol), 1), "LogP": round(Descriptors.MolLogP(mol), 2), "TPSA": round(Descriptors.TPSA(mol), 1), "H-доноры": Lipinski.NumHDonors(mol), "H-акцепторы": Lipinski.NumHAcceptors(mol)}
-st.title("🧪 Профиль молекулы")
+st.title("Профиль молекулы")
 st.caption(f"SMILES: `{smiles}` · Формула: **{rdMolDescriptors.CalcMolFormula(mol)}**")
 
 c1, c2, c3 = st.columns([1, 1.1, 1.4])
@@ -175,7 +186,7 @@ with c4:
         ld50 = ld50_mgkg(ld50_log, desc["MW"])
         col = color_for(ld50)
         st.markdown(f'<div class="card card-{col}" style="text-align:center"><div class="big">{ld50:.0f}</div><div>мг/кг (oral)</div><div style="font-weight:700;margin-top:8px">GHS {ghs_class(ld50)}</div></div>', unsafe_allow_html=True)
-        if calc_ip: st.markdown(f"**Оценка i.p.: ≈ {ld50*0.33:.0f} мг/кг**")
+        if calc_ip: st.markdown(f"**Оценка i.p.: {ld50*0.33:.0f} мг/кг**")
     elif "error" in tox:
         st.error(tox["error"])
 with c5:
@@ -197,8 +208,8 @@ with c6:
     elif esk_err:
         st.error(f"Ошибка ESKAPE: {esk_err}")
     else:
-        st.info("Нажмите «Рассчитать всё»")
+        st.info("Нажмите 'Рассчитать всё'")
 
 if antif:
     st.markdown("#### Противогрибковые мотивы")
-    for a in antif: st.warning(f"⚠️ {a}")
+    for a in antif: st.warning(a)

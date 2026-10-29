@@ -1,0 +1,7 @@
+rdkit
+pandas
+plotly
+streamlit
+admet-ai
+scikit-learn
+pywebview
