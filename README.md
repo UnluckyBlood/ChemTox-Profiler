@@ -22,7 +22,7 @@
 ### Подготовка системы
 Откройте терминал и установите зависимости:
 `sudo apt update`
-`sudo apt install python3 python3-venv python3-pip build-essential libgirepository1.0-dev gobject-introspection libcairo2-dev pkg-config libgl1-mesa-glx`
+`sudo apt install python3 python3-venv python3-pip build-essential libgirepository1.0-dev gobject-introspection libcairo2-dev pkg-config libgl1`
 
 ### Запуск
 1. Перейдите в папку с проектом.
