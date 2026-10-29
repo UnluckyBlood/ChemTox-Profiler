@@ -1,31 +1,13 @@
-# Python
 __pycache__/
 *.py[cod]
-venv/
-env/
-eskape_env/
-.venv/
-
-# Тяжелые папки проекта (Python, Модели, Временные файлы)
 python/
 db/
+venv/
 eskape_output/
 eskape_temp/
-The-ESKAPE-Model-main/
-
-# Скомпилированные установщики
 dist/
 *.exe
-
-# Пользовательские файлы
-*.log
 *.zip
-*.7z
-*.png
-*.jpg
-
-# IDE
+*.log
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
