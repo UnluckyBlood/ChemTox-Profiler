@@ -1,13 +1,63 @@
+# ===== Python =====
 __pycache__/
 *.py[cod]
-python/
-db/
-venv/
-eskape_output/
-eskape_temp/
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
 dist/
-*.exe
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===== Виртуальные окружения (Linux) =====
+venv/
+.venv/
+env/
+ENV/
+
+# ===== Портативный Python (Windows) =====
+python/
+
+# ===== Данные моделей =====
+db/
+
+# ===== Сборки =====
+dist/
 *.zip
+ChemTox-Profiler-Linux.zip
+ChemTox-Profiler-Windows-.zip
+
+# ===== Streamlit =====
+.streamlit/
+
+# ===== Генерируемые данные ESKAPE =====
+eskape_output/
+
+# ===== Логи =====
 *.log
-.vscode/
+
+# ===== Отладка =====
+_inspect.py
+
+# ===== IDE =====
 .idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== OS =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store

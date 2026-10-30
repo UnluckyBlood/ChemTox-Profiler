@@ -1,4 +1,7 @@
-import base64, json, subprocess, sys, os
+import base64
+import subprocess
+import sys
+import os
 from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
@@ -25,103 +28,157 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Перевод LD50 из log(mol/kg) в мг/кг
-def ld50_mgkg(log_molkg, mw): 
+
+def ld50_mgkg(log_molkg, mw):
     return (10 ** (-log_molkg)) * mw * 1000
 
-# Определение класса опасности GHS
+
 def ghs_class(mg):
-    if mg is None: return "—"
-    if mg < 5: return "1 — смертельно"
-    if mg < 50: return "2 — смертельно"
-    if mg < 300: return "3 — токсично"
-    if mg < 2000: return "4 — вредно"
-    if mg < 5000: return "5 — малоопасно"
+    if mg is None:
+        return "—"
+    if mg < 5:
+        return "1 — смертельно"
+    if mg < 50:
+        return "2 — смертельно"
+    if mg < 300:
+        return "3 — токсично"
+    if mg < 2000:
+        return "4 — вредно"
+    if mg < 5000:
+        return "5 — малоопасно"
     return "> 5000 — нетоксично"
 
-# Определение цвета карточки по уровню токсичности
+
 def color_for(mg):
-    if mg is None: return "gray"
-    if mg < 300: return "red"
-    if mg < 2000: return "yellow"
+    if mg is None:
+        return "gray"
+    if mg < 300:
+        return "red"
+    if mg < 2000:
+        return "yellow"
     return "green"
 
-# Генерация SVG-изображения молекулы
+
 def mol_svg(mol, w=340, h=340):
     d = rdMolDraw2D.MolDraw2DSVG(w, h)
     rdMolDraw2D.PrepareAndDrawMolecule(d, mol)
     d.FinishDrawing()
     b64 = base64.b64encode(d.GetDrawingText().encode()).decode()
-    return f'<div style="background:#fff;padding:10px;border-radius:10px;text-align:center"><img src="data:image/svg+xml;base64,{b64}" width="{w}"/></div>'
+    return (
+        f'<div style="background:#fff;padding:10px;border-radius:10px;text-align:center">'
+        f'<img src="data:image/svg+xml;base64,{b64}" width="{w}"/></div>'
+    )
 
-# Прогноз токсичности через ADMET-AI
+
 def run_admet(smiles):
     try:
         from admet_ai import ADMETModel
         p = ADMETModel().predict(smiles=smiles)
         keys = {"hERG": "hERG", "DILI": "DILI", "Ames": "AMES", "LD50": "LD50_Zhu"}
         out = {}
-        for l, k in keys.items():
-            if isinstance(p, dict) and k in p: out[l] = float(p[k])
+        for label, key in keys.items():
+            if isinstance(p, dict) and key in p:
+                out[label] = float(p[key])
         return out
-    except Exception as e: 
+    except Exception as e:
         return {"error": str(e)}
 
-# Прогноз антибактериальной активности (Random Forest)
+
 def run_eskape(smiles):
     csv_in = ESKAPE_DIR / "input.csv"
     pd.DataFrame({"smiles": [smiles]}).to_csv(csv_in, index=False)
-    
+
     for f in ESKAPE_DIR.glob("*"):
         if f.name != "input.csv":
-            try: f.unlink()
-            except: pass
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
     pathogens = ["AB", "BW", "DKO", "EF", "KP", "PA", "SA"]
     results = {"rf": {}}
     db_dir = WORKDIR / "db" / "models" / "all"
-    sklearn_exe = str(WORKDIR / "python" / "Scripts" / "sklearn_predict.exe")
 
+    if os.name == 'nt':
+        python_exe = str(WORKDIR / "python" / "python.exe")
+    else:
+        python_exe = sys.executable
+
+    runner = (
+        "import sys;"
+        "sys.argv[0]='sklearn_predict';"
+        "from chemprop.sklearn_predict import sklearn_predict;"
+        "sys.exit(sklearn_predict())"
+    )
+
+    errors = []
     for p in pathogens:
         preds_path = ESKAPE_DIR / f"{p}_rf.csv"
         model_dir = db_dir / f"{p}_rf"
         try:
-            subprocess.run(
-                [sklearn_exe, "--test_path", str(csv_in), "--checkpoint_dir", str(model_dir), "--preds_path", str(preds_path)],
-                capture_output=True, text=True, timeout=300
+            proc = subprocess.run(
+                [python_exe, "-c", runner,
+                 "--test_path", str(csv_in),
+                 "--checkpoint_dir", str(model_dir),
+                 "--preds_path", str(preds_path)],
+                cwd=str(WORKDIR),
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                tail = tail[-3:] if tail else []
+                errors.append(f"{p}: rc={proc.returncode}; " + " | ".join(tail))
+                continue
             if preds_path.exists():
                 df = pd.read_csv(preds_path)
                 if not df.empty:
                     results["rf"][p] = float(df.iloc[0]["activity"])
-        except Exception:
-            pass
+                else:
+                    errors.append(f"{p}: пустой файл предсказаний")
+            else:
+                errors.append(f"{p}: файл предсказаний не создан")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{p}: timeout 300s")
+        except Exception as e:
+            errors.append(f"{p}: {type(e).__name__}: {e}")
 
-    return {"input.csv": {smiles: results}}, None
+    return {"input.csv": {smiles: results}}, ("; ".join(errors) if errors else None)
 
-# Поиск противогрибковых SMARTS-паттернов
+
 def antifungal(mol):
     out = []
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("n1cncc1")): out.append("Азольное кольцо")
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("C=C-C=C-C=C")): out.append("Полиеновая система")
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("c[Cl,Br,F]")): out.append("Галоген-ароматика")
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("n1cncc1")):
+        out.append("Азольное кольцо")
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("C=C-C=C-C=C")):
+        out.append("Полиеновая система")
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("c[Cl,Br,F]")):
+        out.append("Галоген-ароматика")
     return out
+
 
 with st.sidebar:
     st.header("Ввод")
-    smiles_in = st.text_area("SMILES", "CN(C)CCCN(CCCN(C)C)C(=O)C(Cc1ccccc1)NC(=O)C12CC3CC(CC(C3)C1)C2", height=90)
+    smiles_in = st.text_area(
+        "SMILES",
+        "CN(C)CCCN(CCCN(C)C)C(=O)C(Cc1ccccc1)NC(=O)C12CC3CC(CC(C3)C1)C2",
+        height=90,
+    )
     with st.expander("Справочные LD50 (вручную)"):
         ref_oral = st.number_input("Перорально, мг/кг", min_value=0.0, value=0.0)
         ref_ip = st.number_input("i.p., мг/кг", min_value=0.0, value=0.0)
         calc_ip = st.checkbox("Рассчитать i.p. из oral (x0.33)", value=True)
-    
     calc_btn = st.button("Рассчитать всё", type="primary", use_container_width=True)
 
 if not smiles_in or not smiles_in.strip():
-    st.info("Введите SMILES слева."); st.stop()
+    st.info("Введите SMILES слева.")
+    st.stop()
+
 mol = Chem.MolFromSmiles(smiles_in.strip())
 if mol is None:
-    st.error("Неверный SMILES."); st.stop()
+    st.error("Неверный SMILES.")
+    st.stop()
 
 smiles = Chem.MolToSmiles(mol)
 
@@ -154,29 +211,45 @@ if esk:
         for s_json, r in by_s.items():
             for method in ("rf", "chemprop", "rdkit"):
                 for p, v in (r.get(method) or {}).items():
-                    if v not in ("", None): esk_merged.setdefault(p, []).append(float(v))
-    esk_merged = {p: sum(vs)/len(vs) for p, vs in esk_merged.items()}
+                    if v not in ("", None):
+                        esk_merged.setdefault(p, []).append(float(v))
+    esk_merged = {p: sum(vs) / len(vs) for p, vs in esk_merged.items()}
 
-desc = {"MW": round(Descriptors.MolWt(mol), 1), "LogP": round(Descriptors.MolLogP(mol), 2), "TPSA": round(Descriptors.TPSA(mol), 1), "H-доноры": Lipinski.NumHDonors(mol), "H-акцепторы": Lipinski.NumHAcceptors(mol)}
+desc = {
+    "MW": round(Descriptors.MolWt(mol), 1),
+    "LogP": round(Descriptors.MolLogP(mol), 2),
+    "TPSA": round(Descriptors.TPSA(mol), 1),
+    "H-доноры": Lipinski.NumHDonors(mol),
+    "H-акцепторы": Lipinski.NumHAcceptors(mol),
+}
+
 st.title("Профиль молекулы")
 st.caption(f"SMILES: `{smiles}` · Формула: **{rdMolDescriptors.CalcMolFormula(mol)}**")
 
 c1, c2, c3 = st.columns([1, 1.1, 1.4])
 with c1:
-    st.markdown("#### Структура"); st.markdown(mol_svg(mol), unsafe_allow_html=True)
+    st.markdown("#### Структура")
+    st.markdown(mol_svg(mol), unsafe_allow_html=True)
 with c2:
     st.markdown("#### Вердикт")
     herg, dil = tox.get("hERG", 0), tox.get("DILI", 0)
     max_esk = max(esk_merged.values()) if esk_merged else 0
     antif = antifungal(mol)
-    def card(lbl, val, style): st.markdown(f'<div class="card card-{style}"><b>{lbl}:</b> {val}</div>', unsafe_allow_html=True)
+
+    def card(lbl, val, style):
+        st.markdown(f'<div class="card card-{style}"><b>{lbl}:</b> {val}</div>', unsafe_allow_html=True)
+
     card("Антибактериальная", "ДА" if max_esk >= 0.5 else "НЕТ", "red" if max_esk >= 0.5 else "green")
     card("Антифунгальная", "МОЖЕТ БЫТЬ" if antif else "НЕТ", "yellow" if antif else "green")
     card("Кардиориск (hERG)", f"{'ВЫСОКИЙ' if herg > 0.5 else 'НИЗКИЙ'} ({herg:.3f})", "red" if herg > 0.5 else "green")
     card("Гепатотоксичность", f"{'ВЫСОКАЯ' if dil > 0.5 else 'НИЗКАЯ'} ({dil:.3f})", "red" if dil > 0.5 else "green")
 with c3:
     st.markdown("#### Свойства")
-    st.dataframe(pd.DataFrame({"Значение": [str(v) for v in desc.values()]}, index=list(desc.keys())), use_container_width=True, height=250)
+    st.dataframe(
+        pd.DataFrame({"Значение": [str(v) for v in desc.values()]}, index=list(desc.keys())),
+        use_container_width=True,
+        height=250,
+    )
 
 c4, c5, c6 = st.columns([1, 1.4, 1.4])
 with c4:
@@ -185,8 +258,14 @@ with c4:
     if ld50_log:
         ld50 = ld50_mgkg(ld50_log, desc["MW"])
         col = color_for(ld50)
-        st.markdown(f'<div class="card card-{col}" style="text-align:center"><div class="big">{ld50:.0f}</div><div>мг/кг (oral)</div><div style="font-weight:700;margin-top:8px">GHS {ghs_class(ld50)}</div></div>', unsafe_allow_html=True)
-        if calc_ip: st.markdown(f"**Оценка i.p.: {ld50*0.33:.0f} мг/кг**")
+        st.markdown(
+            f'<div class="card card-{col}" style="text-align:center">'
+            f'<div class="big">{ld50:.0f}</div><div>мг/кг (oral)</div>'
+            f'<div style="font-weight:700;margin-top:8px">GHS {ghs_class(ld50)}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if calc_ip:
+            st.markdown(f"**Оценка i.p.: {ld50 * 0.33:.0f} мг/кг**")
     elif "error" in tox:
         st.error(tox["error"])
 with c5:
@@ -194,17 +273,35 @@ with c5:
     pk = [k for k in tox if k != "LD50" and k != "error"]
     if pk:
         vals = [tox[k] for k in pk]
-        fig = go.Figure(go.Bar(x=vals, y=pk, orientation="h", marker_color=["#d62728" if v > 0.5 else "#2ca02c" for v in vals], text=[f"{v:.3f}" for v in vals], textposition="auto"))
-        fig.update_layout(xaxis_range=[0, 1], height=230, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        fig = go.Figure(go.Bar(
+            x=vals, y=pk, orientation="h",
+            marker_color=["#d62728" if v > 0.5 else "#2ca02c" for v in vals],
+            text=[f"{v:.3f}" for v in vals], textposition="auto",
+        ))
+        fig.update_layout(
+            xaxis_range=[0, 1], height=230,
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        )
         st.plotly_chart(fig, use_container_width=True)
 with c6:
     st.markdown("#### Антибактериальная (ESKAPE)")
     if esk_merged:
         paths = sorted(esk_merged, key=lambda p: esk_merged[p])
         vals = [esk_merged[p] for p in paths]
-        fig = go.Figure(go.Bar(x=vals, y=paths, orientation="h", marker_color=["#d62728" if v > 0.5 else "#2ca02c" for v in vals], text=[f"{v:.3f}" for v in vals], textposition="auto"))
-        fig.update_layout(xaxis_range=[0, 1], height=230, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        fig = go.Figure(go.Bar(
+            x=vals, y=paths, orientation="h",
+            marker_color=["#d62728" if v > 0.5 else "#2ca02c" for v in vals],
+            text=[f"{v:.3f}" for v in vals], textposition="auto",
+        ))
+        fig.update_layout(
+            xaxis_range=[0, 1], height=230,
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        )
         st.plotly_chart(fig, use_container_width=True)
+        if esk_err:
+            st.warning(f"Частичный результат ESKAPE: {esk_err}")
     elif esk_err:
         st.error(f"Ошибка ESKAPE: {esk_err}")
     else:
@@ -212,4 +309,5 @@ with c6:
 
 if antif:
     st.markdown("#### Противогрибковые мотивы")
-    for a in antif: st.warning(a)
+    for a in antif:
+        st.warning(a)
