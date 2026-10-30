@@ -1,7 +1,10 @@
 # ============================================================
 # ChemTox Profiler - установка на Windows
-# Скачивает embeddable Python, pip-библиотеки и модели ESKAPE
-# Поддерживает возобновление: уже скачанное не качается повторно
+# - ставит embeddable Python 3.10 и pip
+# - ставит библиотеки из requirements.txt
+# - проверяет 21 модель ESKAPE; если чего-то нет, восстанавливает
+#   из локального The-ESKAPE-Model-main.zip или качает с GitHub
+# - докачивает LFS-заглушки (если zip был "сырой")
 # ============================================================
 
 $ErrorActionPreference = "Stop"
@@ -9,64 +12,123 @@ $WORKDIR = $PSScriptRoot
 Set-Location $WORKDIR
 
 # --- Конфигурация ---
-$PY_VERSION = "3.10.11"                                                                          # версия embeddable Python
-$PY_URL = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-embed-amd64.zip"     # откуда качать Python
-$GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"                                            # официальный загрузчик pip
-$ESKAPE_REPO = "https://github.com/arnolp3/The-ESKAPE-Model"                                     # репозиторий с моделями ESKAPE
-$ESKAPE_LFS_BASE = "https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main"     # CDN для LFS-файлов
-$PATHOGENS = @("AB","BW","DKO","EF","KP","PA","SA")                                              # 7 приоритетных патогенов ESKAPE
-$METHODS = @("rf","chemprop","rdkit")                                                            # 3 типа моделей для каждого патогена
+$PY_VERSION       = "3.10.11"
+$PY_URL           = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-embed-amd64.zip"
+$GET_PIP_URL      = "https://bootstrap.pypa.io/get-pip.py"
+$ESKAPE_REPO      = "https://github.com/arnolp3/The-ESKAPE-Model"
+$ESKAPE_LFS_BASE  = "https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main"
+$ESKAPE_LOCAL_ZIP = "The-ESKAPE-Model-main.zip"
+$DB_ROOT          = "db\models\all"
+$PATHOGENS        = @("AB","BW","DKO","EF","KP","PA","SA")
+$METHODS          = @("rf","chemprop","rdkit")
 
-# --- Вспомогательные функции ---
-function Write-Step($msg) {
-    # Печатает заголовок шага цветом
-    Write-Host ""
-    Write-Host "=== $msg ===" -ForegroundColor Cyan
-}
+# --- Утилиты ---
+function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" -ForegroundColor Cyan }
+function Write-Ok($msg)   { Write-Host $msg -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
+function Write-Err($msg)  { Write-Host $msg -ForegroundColor Red }
 
 function Test-LFSPointer($path) {
-    # Проверяет по содержимому (не по размеру), что файл - LFS-заглушка
+    # Файл - LFS-заглушка, если маленький и начинается с сигнатуры git-lfs
     try {
         $info = Get-Item -LiteralPath $path -ErrorAction Stop
-        if ($info.Length -gt 256) { return $false }                                              # реальный файл больше 256 байт
-        if ($info.Length -eq 0) { return $false }                                                # пустой файл не заглушка
-        $bytes = [IO.File]::ReadAllBytes($path)
-        $text = [Text.Encoding]::UTF8.GetString($bytes)
-        return $text.StartsWith("version https://git-lfs.github.com/spec/v1")                    # сигнатура LFS-пойнтера
+        if ($info.Length -gt 256) { return $false }
+        if ($info.Length -eq 0) { return $false }
+        $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($path))
+        return $text.StartsWith("version https://git-lfs.github.com/spec/v1")
     } catch { return $false }
 }
 
-function Get-EskapeStatus {
-    # Возвращает absent / partial / complete - нужна для решения, что качать
-    if (-not (Test-Path "db\models\all")) { return "absent" }
+function Get-LfsPointers {
+    # Список LFS-заглушек под db/
+    $list = New-Object System.Collections.ArrayList
+    if (-not (Test-Path "db")) { return @() }
+    Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        if (Test-LFSPointer $_.FullName) { [void]$list.Add($_) }
+    }
+    return $list.ToArray()
+}
 
-    # Проверяем наличие всех 21 папок (7 патогенов x 3 метода)
+function Test-ModelDir {
+    # Папка модели годна, если существует и содержит хотя бы один файл
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $files = Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue
+    return ($files.Count -gt 0)
+}
+
+function Get-MissingModels {
+    # Список {P}_{M}, которых нет или они пусты (из 21)
     $missing = @()
     foreach ($p in $PATHOGENS) {
         foreach ($m in $METHODS) {
-            $dir = "db\models\all\${p}_${m}"
-            if (-not (Test-Path $dir)) { $missing += "${p}_${m}" }
+            $key = "${p}_${m}"
+            if (-not (Test-ModelDir "$DB_ROOT\$key")) { $missing += $key }
         }
     }
-
-    # Ищем LFS-заглушки по содержимому
-    $pointers = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { Test-LFSPointer $_.FullName })
-
-    if ($missing.Count -eq 0 -and $pointers.Count -eq 0) { return "complete" }                   # всё на месте
-    return "partial"                                                                             # чего-то не хватает
+    return $missing
 }
 
-function Invoke-LfsDownload($file) {
-    # Качает один LFS-файл через media CDN и проверяет, что пришёл не пойнтер
-    $rel = $file.FullName.Substring($WORKDIR.Path.Length + 1).Replace("\", "/")
-    $url = "$ESKAPE_LFS_BASE/$rel"
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $file.FullName -UseBasicParsing -ErrorAction Stop
-        if (Test-LFSPointer $file.FullName) { return "still-pointer" }                           # сервер не отдал файл
-        return "ok"
-    } catch {
-        return "error: $_"
+function Test-EskapeComplete {
+    # Полный ESKAPE = все 21 модели на месте + нет LFS-заглушек
+    if ((Get-MissingModels).Count -gt 0) { return $false }
+    if ((Get-LfsPointers).Count -gt 0) { return $false }
+    return $true
+}
+
+function Expand-EskapeZip($zipPath) {
+    # Распаковка с поиском db на любой глубине (устойчиво к имени корневой папки)
+    Write-Step "Распаковка $zipPath"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tmp = "_eskape_extract"
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $tmp)
+
+    $dbDir = Get-ChildItem $tmp -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Name -eq "db") -and (Test-Path "$($_.FullName)\models\all")
+    } | Select-Object -First 1
+
+    if (-not $dbDir) {
+        Remove-Item $tmp -Recurse -Force
+        throw "В архиве $zipPath не найдена папка db\models\all"
     }
+
+    if (Test-Path "db") { Remove-Item "db" -Recurse -Force }
+    Move-Item $dbDir.FullName "db"
+    Remove-Item $tmp -Recurse -Force
+    Write-Ok "Распаковано: db/"
+}
+
+function Invoke-EskapeDownload {
+    # Скачивание свежего архива с GitHub
+    $tmpZip = "eskape-main.zip"
+    Write-Step "Скачивание ESKAPE с $ESKAPE_REPO (~3.5 ГБ)"
+    Invoke-WebRequest -Uri "$ESKAPE_REPO/archive/refs/heads/main.zip" -OutFile $tmpZip -UseBasicParsing
+    try { Expand-EskapeZip $tmpZip }
+    finally { if (Test-Path $tmpZip) { Remove-Item $tmpZip -Force } }
+}
+
+function Invoke-LfsFill {
+    # Докачка LFS-заглушек через media CDN
+    $pointers = Get-LfsPointers
+    if ($pointers.Count -eq 0) { Write-Ok "LFS-заглушек нет"; return }
+    Write-Step "Докачка LFS ($($pointers.Count) файлов)"
+    $i = 0; $errors = @()
+    foreach ($f in $pointers) {
+        $i++
+        if ($i % 20 -eq 0 -or $i -eq $pointers.Count) { Write-Host "  [$i/$($pointers.Count)] $($f.Name)" }
+        $rel = $f.FullName.Substring($WORKDIR.Path.Length + 1).Replace("\", "/")
+        $url = "$ESKAPE_LFS_BASE/$rel"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $f.FullName -UseBasicParsing -ErrorAction Stop
+            if (Test-LFSPointer $f.FullName) {
+                Write-Err "  ПУСТО: $($f.Name)"; $errors += $f.Name
+            }
+        } catch {
+            Write-Err "  ОШИБКА: $($f.Name) - $_"; $errors += $f.Name
+        }
+    }
+    if ($errors.Count -gt 0) { Write-Warn "Не скачано: $($errors.Count). Повторите install.bat." }
 }
 
 # --- Приветствие ---
@@ -74,23 +136,15 @@ Write-Host "=========================================="
 Write-Host " ChemTox Profiler - установка"
 Write-Host "=========================================="
 Write-Host ""
-Write-Host "ВНИМАНИЕ: первичное скачивание ESKAPE" -ForegroundColor Yellow
-Write-Host "может занять НЕСКОЛЬКО ЧАСОВ." -ForegroundColor Yellow
-Write-Host "При прерывании - запустите install.bat снова," -ForegroundColor Yellow
-Write-Host "докачается только недостающее." -ForegroundColor Yellow
-Write-Host ""
 
 # --- Шаг 1: Python ---
 if (-not (Test-Path "python\python.exe")) {
-    Write-Step "Скачивание Python $PY_VERSION (~10 МБ)"
+    Write-Step "Скачивание Python $PY_VERSION"
     Invoke-WebRequest -Uri $PY_URL -OutFile "python.zip" -UseBasicParsing
     Expand-Archive -Path "python.zip" -DestinationPath "python" -Force
     Remove-Item "python.zip"
-
-    # Embeddable Python по умолчанию не подхватывает site-packages - включаем импорт site
     $pth = Get-ChildItem "python\python*._pth" | Select-Object -First 1
     (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' | Set-Content $pth.FullName
-
     Write-Step "Установка pip"
     Invoke-WebRequest -Uri $GET_PIP_URL -OutFile "get-pip.py" -UseBasicParsing
     & ".\python\python.exe" "get-pip.py"
@@ -99,71 +153,49 @@ if (-not (Test-Path "python\python.exe")) {
     Write-Step "Python уже установлен"
 }
 
-# --- Шаг 2: pip-библиотеки ---
-Write-Step "Установка библиотек (2-10 минут)"
+# --- Шаг 2: библиотеки ---
+Write-Step "Установка библиотек"
 & ".\python\python.exe" -m pip install --upgrade pip
 & ".\python\python.exe" -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "pip install завершился с ошибкой" }
 
-# --- Шаг 3: проверка состояния ESKAPE ---
-$status = Get-EskapeStatus
-Write-Step "Проверка данных ESKAPE: $status"
+# --- Шаг 3: ESKAPE ---
+if (Test-EskapeComplete) {
+    Write-Step "ESKAPE уже полностью установлен - пропуск"
+} else {
+    $missing = Get-MissingModels
+    $pointers = Get-LfsPointers
+    Write-Step "ESKAPE неполный"
+    if ($missing.Count -gt 0)  { Write-Warn "Отсутствует моделей: $($missing.Count) из 21" }
+    if ($pointers.Count -gt 0) { Write-Warn "LFS-заглушек: $($pointers.Count)" }
 
-# --- Шаг 4: основной архив ESKAPE (если db отсутствует) ---
-if ($status -eq "absent") {
-    Write-Step "Скачивание ESKAPE (основной архив)"
-    $tmpZip = "eskape-main.zip"
-    Invoke-WebRequest -Uri "$ESKAPE_REPO/archive/refs/heads/main.zip" -OutFile $tmpZip -UseBasicParsing
-    Expand-Archive -Path $tmpZip -DestinationPath "_eskape_tmp" -Force
-    Remove-Item $tmpZip
-
-    # В архиве GitHub папка db лежит внутри <repo>-main/, переносим её наверх
-    $root = Get-ChildItem "_eskape_tmp" -Directory | Select-Object -First 1
-    Move-Item "$($root.FullName)\db" "db" -Force
-    Remove-Item "_eskape_tmp" -Recurse -Force
-    $status = "partial"                                                                          # теперь нужна докачка LFS
-}
-
-# --- Шаг 5: докачка LFS-файлов (заглушек) ---
-if ($status -eq "partial") {
-    Write-Host "Поиск недокачанных LFS-файлов..." -ForegroundColor Yellow
-    Write-Step "Докачка LFS (может занять часы)"
-
-    $pointers = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { Test-LFSPointer $_.FullName })
-    $total = $pointers.Count
-    if ($total -eq 0) {
-        Write-Host "Все LFS-файлы уже на месте."
-    } else {
-        Write-Host "Нужно докачать: $total"
-        $i = 0
-        $errors = @()
-        foreach ($f in $pointers) {
-            $i++
-            if ($i % 20 -eq 0 -or $i -eq $total) { Write-Host "  [$i/$total] $($f.Name)" }
-            $res = Invoke-LfsDownload $f
-            if ($res -ne "ok") {
-                Write-Host "  ПРОБЛЕМА [$($f.Name)]: $res" -ForegroundColor Red
-                $errors += "$($f.Name): $res"
-            }
-        }
-        if ($errors.Count -gt 0) {
-            Write-Host ""
-            Write-Host "Не скачано: $($errors.Count). Повторите install.bat - докачает только проблемные." -ForegroundColor Yellow
+    # Есть ли вообще db или модели не хватает - восстанавливаем архив
+    if ((-not (Test-Path $DB_ROOT)) -or ($missing.Count -gt 0)) {
+        if (Test-Path $ESKAPE_LOCAL_ZIP) {
+            Write-Ok "Найден локальный $ESKAPE_LOCAL_ZIP - использую его"
+            Expand-EskapeZip $ESKAPE_LOCAL_ZIP
+        } else {
+            Write-Warn "Локального архива нет - скачаю с $ESKAPE_REPO"
+            Invoke-EskapeDownload
         }
     }
-} else {
-    Write-Step "ESKAPE уже полностью установлен - пропуск"
+
+    # Докачиваем заглушки, если после распаковки они остались
+    Invoke-LfsFill
 }
 
-# --- Шаг 6: финальная верификация ---
-$final = Get-EskapeStatus
+# --- Финальный отчёт ---
 Write-Host ""
 Write-Host "=========================================="
-if ($final -eq "complete") {
-    Write-Host " Готово! ESKAPE: 21/21 модель, LFS-файлы на месте" -ForegroundColor Green
-    Write-Host " Запускайте launch.bat" -ForegroundColor Green
+if (Test-EskapeComplete) {
+    Write-Ok " Готово! ESKAPE: 21/21 модель, LFS на месте"
+    Write-Ok " Запускайте launch.bat"
 } else {
-    Write-Host " Установка не завершена (ESKAPE: $final)" -ForegroundColor Yellow
-    Write-Host " Повторите install.bat" -ForegroundColor Yellow
+    $stillMissing  = Get-MissingModels
+    $stillPointers = Get-LfsPointers
+    Write-Warn " Установка не завершена"
+    if ($stillMissing.Count -gt 0)  { Write-Warn "  нет моделей: $($stillMissing -join ', ')" }
+    if ($stillPointers.Count -gt 0) { Write-Warn "  LFS-заглушек: $($stillPointers.Count)" }
+    Write-Warn " Повторите install.bat"
 }
 Write-Host "=========================================="
