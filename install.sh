@@ -3,8 +3,18 @@ set -e
 cd "$(dirname "$0")"
 
 ESKAPE_REPO="https://github.com/arnolp3/The-ESKAPE-Model"
+ESKAPE_LFS_BASE="https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main"
 PATHOGENS="AB BW DKO EF KP PA SA"
 METHODS="rf chemprop rdkit"
+
+is_lfs_pointer() {
+    [ -f "$1" ] || return 1
+    local sz
+    sz=$(stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo 0)
+    [ "$sz" -le 256 ] || return 1
+    [ "$sz" -gt 0 ] || return 1
+    head -c 60 "$1" 2>/dev/null | grep -q "^version https://git-lfs.github.com/spec/v1"
+}
 
 eskape_status() {
     [ -d "db/models/all" ] || { echo "absent"; return; }
@@ -14,9 +24,11 @@ eskape_status() {
             [ -d "db/models/all/${p}_${m}" ] || missing=$((missing+1))
         done
     done
-    local placeholders
-    placeholders=$(find db -type f -size -1000c 2>/dev/null | wc -l)
-    if [ "$missing" -eq 0 ] && [ "$placeholders" -eq 0 ]; then echo "complete"; else echo "partial"; fi
+    local pointers=0
+    while IFS= read -r f; do
+        is_lfs_pointer "$f" && pointers=$((pointers+1))
+    done < <(find db -type f 2>/dev/null)
+    if [ "$missing" -eq 0 ] && [ "$pointers" -eq 0 ]; then echo "complete"; else echo "partial"; fi
 }
 
 echo "=========================================="
@@ -54,17 +66,26 @@ if [ "$status" = "absent" ]; then
 fi
 
 if [ "$status" = "partial" ]; then
-    echo "Докачка LFS-файлов..."
-    todo=$(find db -type f -size -1000c 2>/dev/null | wc -l)
-    echo "Нужно докачать: $todo"
-    find db -type f -size -1000c 2>/dev/null | while read -r f; do
+    echo "Поиск недокачанных LFS-файлов..."
+    pointers=()
+    while IFS= read -r f; do
+        is_lfs_pointer "$f" && pointers+=("$f")
+    done < <(find db -type f 2>/dev/null)
+
+    total=${#pointers[@]}
+    echo "Нужно докачать: $total"
+
+    for f in "${pointers[@]}"; do
         rel="${f#./}"
-        url="https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main/$rel"
+        url="$ESKAPE_LFS_BASE/$rel"
         echo "  $rel"
         if command -v curl >/dev/null 2>&1; then
-            curl -fL -o "$f" "$url" || echo "  ОШИБКА: $f"
+            curl -fL -o "$f" "$url" || echo "    ОШИБКА: $f"
         else
-            wget -O "$f" "$url" || echo "  ОШИБКА: $f"
+            wget -O "$f" "$url" || echo "    ОШИБКА: $f"
+        fi
+        if is_lfs_pointer "$f"; then
+            echo "    ПУСТО (сервер не отдал): $f"
         fi
     done
 else

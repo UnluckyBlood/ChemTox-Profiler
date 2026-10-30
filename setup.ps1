@@ -6,10 +6,22 @@ $PY_VERSION = "3.10.11"
 $PY_URL = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-embed-amd64.zip"
 $GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 $ESKAPE_REPO = "https://github.com/arnolp3/The-ESKAPE-Model"
+$ESKAPE_LFS_BASE = "https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main"
 $PATHOGENS = @("AB","BW","DKO","EF","KP","PA","SA")
 $METHODS = @("rf","chemprop","rdkit")
 
 function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" -ForegroundColor Cyan }
+
+function Test-LFSPointer($path) {
+    try {
+        $info = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ($info.Length -gt 256) { return $false }
+        $bytes = [IO.File]::ReadAllBytes($path)
+        if ($bytes.Length -eq 0) { return $false }
+        $text = [Text.Encoding]::UTF8.GetString($bytes)
+        return $text.StartsWith("version https://git-lfs.github.com/spec/v1")
+    } catch { return $false }
+}
 
 function Get-EskapeStatus {
     if (-not (Test-Path "db\models\all")) { return "absent" }
@@ -21,10 +33,24 @@ function Get-EskapeStatus {
             if (-not (Test-Path $dir)) { $missing += "${p}_${m}" }
         }
     }
-    $placeholders = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 1000 })
+    $pointers = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { Test-LFSPointer $_.FullName })
 
-    if ($missing.Count -eq 0 -and $placeholders.Count -eq 0) { return "complete" }
+    if ($missing.Count -eq 0 -and $pointers.Count -eq 0) { return "complete" }
     return "partial"
+}
+
+function Invoke-LfsDownload($file) {
+    $rel = $file.FullName.Substring($WORKDIR.Path.Length + 1).Replace("\", "/")
+    $url = "$ESKAPE_LFS_BASE/$rel"
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $file.FullName -UseBasicParsing -ErrorAction Stop
+        if (Test-LFSPointer $file.FullName) {
+            return "still-pointer"
+        }
+        return "ok"
+    } catch {
+        return "error: $_"
+    }
 }
 
 Write-Host "=========================================="
@@ -71,31 +97,31 @@ if ($status -eq "absent") {
     $root = Get-ChildItem "_eskape_tmp" -Directory | Select-Object -First 1
     Move-Item "$($root.FullName)\db" "db" -Force
     Remove-Item "_eskape_tmp" -Recurse -Force
+    $status = "partial"
 }
 
-if ($status -eq "absent" -or $status -eq "partial") {
-    if ($status -eq "partial") {
-        Write-Host "Докачка недостающих/недокачанных файлов..." -ForegroundColor Yellow
-    }
-    Write-Step "Докачка LFS-файлов (может занять часы)"
-    $lfsFiles = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 1000 })
-    $total = $lfsFiles.Count
+if ($status -eq "partial") {
+    Write-Host "Поиск недокачанных LFS-файлов..." -ForegroundColor Yellow
+    Write-Step "Докачка LFS (может занять часы)"
+    $pointers = @(Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { Test-LFSPointer $_.FullName })
+    $total = $pointers.Count
     if ($total -eq 0) {
-        Write-Host "Все файлы уже на месте."
+        Write-Host "Все LFS-файлы уже на месте."
     } else {
         Write-Host "Нужно докачать: $total"
         $i = 0; $errors = @()
-        foreach ($f in $lfsFiles) {
+        foreach ($f in $pointers) {
             $i++
-            $rel = $f.FullName.Substring($WORKDIR.Path.Length + 1).Replace("\", "/")
-            $url = "https://media.githubusercontent.com/media/arnolp3/The-ESKAPE-Model/main/$rel"
             if ($i % 20 -eq 0 -or $i -eq $total) { Write-Host "  [$i/$total] $($f.Name)" }
-            try { Invoke-WebRequest -Uri $url -OutFile $f.FullName -UseBasicParsing }
-            catch { Write-Host "  ОШИБКА: $($f.Name): $_" -ForegroundColor Red; $errors += $f.Name }
+            $res = Invoke-LfsDownload $f
+            if ($res -ne "ok") {
+                Write-Host "  ПРОБЛЕМА [$($f.Name)]: $res" -ForegroundColor Red
+                $errors += "$($f.Name): $res"
+            }
         }
         if ($errors.Count -gt 0) {
             Write-Host ""
-            Write-Host "Не скачано: $($errors.Count). Запустите install.bat снова." -ForegroundColor Yellow
+            Write-Host "Не скачано: $($errors.Count). Повторите install.bat - докачает только проблемные." -ForegroundColor Yellow
         }
     }
 } else {
