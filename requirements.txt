@@ -1,7 +1,8 @@
-rdkit
+﻿rdkit
 pandas
 plotly
 streamlit
 admet-ai
 scikit-learn
 pywebview
+chemprop<2

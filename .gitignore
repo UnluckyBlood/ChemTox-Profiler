@@ -61,3 +61,8 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 .DS_Store
+venv/
+_eskape_tmp/
+eskape-main.zip
+python.zip
+get-pip.py
