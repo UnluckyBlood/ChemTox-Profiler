@@ -1,4 +1,4 @@
-# ChemTox Profiler v1.1.0
+# ChemTox Profiler v1.1.1
 
 Десктопное приложение для прогнозирования токсичности (ADMET-AI) и антибактериальной активности (ESKAPE, Random Forest) по SMILES-строке.
 
