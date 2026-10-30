@@ -1,10 +1,7 @@
 ﻿# ============================================================
 # ChemTox Profiler - установка на Windows
-# - ставит embeddable Python 3.10 и pip
-# - ставит библиотеки из requirements.txt
-# - проверяет 21 модель ESKAPE; если чего-то нет, восстанавливает
-#   из локального The-ESKAPE-Model-main.zip или качает с GitHub
-# - докачивает LFS-заглушки (если zip был "сырой")
+# Обязательные модели: 7 _rf (их использует streamlit_app.py)
+# Опциональные: _chemprop / _rdkit (в источнике их нет, не блокируют)
 # ============================================================
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +17,8 @@ $ESKAPE_LFS_BASE  = "https://media.githubusercontent.com/media/arnolp3/The-ESKAP
 $ESKAPE_LOCAL_ZIP = "The-ESKAPE-Model-main.zip"
 $DB_ROOT          = "db\models\all"
 $PATHOGENS        = @("AB","BW","DKO","EF","KP","PA","SA")
-$METHODS          = @("rf","chemprop","rdkit")
+$REQUIRED_METHODS = @("rf")
+$OPTIONAL_METHODS = @("chemprop","rdkit")
 
 # --- Утилиты ---
 function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" -ForegroundColor Cyan }
@@ -40,7 +38,7 @@ function Test-LFSPointer($path) {
 }
 
 function Get-LfsPointers {
-    # Список LFS-заглушек под db/
+    # Все LFS-заглушки под db/
     $list = New-Object System.Collections.ArrayList
     if (-not (Test-Path "db")) { return @() }
     Get-ChildItem "db" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
@@ -53,15 +51,14 @@ function Test-ModelDir {
     # Папка модели годна, если существует и содержит хотя бы один файл
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
-    $files = Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue
-    return ($files.Count -gt 0)
+    return ((Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue).Count -gt 0)
 }
 
-function Get-MissingModels {
-    # Список {P}_{M}, которых нет или они пусты (из 21)
+function Get-Missing($methods) {
+    # Список отсутствующих {P}_{M} для заданного набора методов
     $missing = @()
     foreach ($p in $PATHOGENS) {
-        foreach ($m in $METHODS) {
+        foreach ($m in $methods) {
             $key = "${p}_${m}"
             if (-not (Test-ModelDir "$DB_ROOT\$key")) { $missing += $key }
         }
@@ -69,15 +66,18 @@ function Get-MissingModels {
     return $missing
 }
 
-function Test-EskapeComplete {
-    # Полный ESKAPE = все 21 модели на месте + нет LFS-заглушек
-    if ((Get-MissingModels).Count -gt 0) { return $false }
+function Get-MissingRequired { Get-Missing $REQUIRED_METHODS }
+function Get-MissingOptional { Get-Missing $OPTIONAL_METHODS }
+
+function Test-EskapeRequiredOk {
+    # ESKAPE готов, если все 7 _rf на месте и нет LFS-заглушек
+    if ((Get-MissingRequired).Count -gt 0) { return $false }
     if ((Get-LfsPointers).Count -gt 0) { return $false }
     return $true
 }
 
 function Expand-EskapeZip($zipPath) {
-    # Распаковка с поиском db на любой глубине (устойчиво к имени корневой папки)
+    # Распаковка с поиском db на любой глубине
     Write-Step "Распаковка $zipPath"
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $tmp = "_eskape_extract"
@@ -121,9 +121,7 @@ function Invoke-LfsFill {
         $url = "$ESKAPE_LFS_BASE/$rel"
         try {
             Invoke-WebRequest -Uri $url -OutFile $f.FullName -UseBasicParsing -ErrorAction Stop
-            if (Test-LFSPointer $f.FullName) {
-                Write-Err "  ПУСТО: $($f.Name)"; $errors += $f.Name
-            }
+            if (Test-LFSPointer $f.FullName) { Write-Err "  ПУСТО: $($f.Name)"; $errors += $f.Name }
         } catch {
             Write-Err "  ОШИБКА: $($f.Name) - $_"; $errors += $f.Name
         }
@@ -159,18 +157,18 @@ Write-Step "Установка библиотек"
 & ".\python\python.exe" -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "pip install завершился с ошибкой" }
 
-# --- Шаг 3: ESKAPE ---
-if (Test-EskapeComplete) {
-    Write-Step "ESKAPE уже полностью установлен - пропуск"
+# --- Шаг 3: обязательные модели (7 _rf) ---
+if (Test-EskapeRequiredOk) {
+    Write-Step "Обязательные модели ESKAPE (7 _rf) уже на месте - пропуск"
 } else {
-    $missing = Get-MissingModels
+    $req = Get-MissingRequired
     $pointers = Get-LfsPointers
-    Write-Step "ESKAPE неполный"
-    if ($missing.Count -gt 0)  { Write-Warn "Отсутствует моделей: $($missing.Count) из 21" }
+    Write-Step "Обязательные модели ESKAPE отсутствуют"
+    if ($req.Count -gt 0)      { Write-Warn "Нет RF-моделей: $($req.Count) из 7" }
     if ($pointers.Count -gt 0) { Write-Warn "LFS-заглушек: $($pointers.Count)" }
 
-    # Есть ли вообще db или модели не хватает - восстанавливаем архив
-    if ((-not (Test-Path $DB_ROOT)) -or ($missing.Count -gt 0)) {
+    # Восстанавливаем архив - в нём точно есть все _rf
+    if (-not (Test-Path $DB_ROOT) -or $req.Count -gt 0) {
         if (Test-Path $ESKAPE_LOCAL_ZIP) {
             Write-Ok "Найден локальный $ESKAPE_LOCAL_ZIP - использую его"
             Expand-EskapeZip $ESKAPE_LOCAL_ZIP
@@ -179,23 +177,32 @@ if (Test-EskapeComplete) {
             Invoke-EskapeDownload
         }
     }
-
-    # Докачиваем заглушки, если после распаковки они остались
     Invoke-LfsFill
+}
+
+# --- Шаг 4: опциональные модели (_chemprop, _rdkit) ---
+# В источнике arnolp3/The-ESKAPE-Model их нет; streamlit_app.py использует только _rf
+$opt = Get-MissingOptional
+if ($opt.Count -eq 0) {
+    Write-Step "Опциональные модели (_chemprop/_rdkit) тоже на месте"
+} else {
+    Write-Step "Опциональные модели (_chemprop/_rdkit): нет $($opt.Count) из 14"
+    Write-Host "Это норма: arnolp3/The-ESKAPE-Model содержит только _rf,"
+    Write-Host "а streamlit_app.py использует только _rf. Пропускаю."
 }
 
 # --- Финальный отчёт ---
 Write-Host ""
 Write-Host "=========================================="
-if (Test-EskapeComplete) {
-    Write-Ok " Готово! ESKAPE: 21/21 модель, LFS на месте"
+if (Test-EskapeRequiredOk) {
+    Write-Ok " Готово! ESKAPE: 7/7 RF-моделей, LFS на месте"
     Write-Ok " Запускайте launch.bat"
 } else {
-    $stillMissing  = Get-MissingModels
-    $stillPointers = Get-LfsPointers
+    $stillReq = Get-MissingRequired
+    $stillLfs = Get-LfsPointers
     Write-Warn " Установка не завершена"
-    if ($stillMissing.Count -gt 0)  { Write-Warn "  нет моделей: $($stillMissing -join ', ')" }
-    if ($stillPointers.Count -gt 0) { Write-Warn "  LFS-заглушек: $($stillPointers.Count)" }
+    if ($stillReq.Count -gt 0) { Write-Warn "  нет RF-моделей: $($stillReq -join ', ')" }
+    if ($stillLfs.Count -gt 0) { Write-Warn "  LFS-заглушек: $($stillLfs.Count)" }
     Write-Warn " Повторите install.bat"
 }
 Write-Host "=========================================="
