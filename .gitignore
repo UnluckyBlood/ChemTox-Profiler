@@ -6,7 +6,6 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/
@@ -43,6 +42,11 @@ ChemTox-Profiler-Windows-.zip
 
 # ===== Генерируемые данные ESKAPE =====
 eskape_output/
+_eskape_tmp/
+_eskape_extract/
+eskape-main.zip
+python.zip
+get-pip.py
 
 # ===== Логи =====
 *.log
@@ -61,8 +65,3 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 .DS_Store
-venv/
-_eskape_tmp/
-eskape-main.zip
-python.zip
-get-pip.py

@@ -1,7 +1,8 @@
 import base64
 import subprocess
 import sys
-import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,9 +12,15 @@ from rdkit.Chem import Descriptors, Lipinski, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 
 WORKDIR = Path(__file__).resolve().parent
-ESKAPE_DIR = WORKDIR / "eskape_output"
 DB_PATH = WORKDIR / "db"
-ESKAPE_DIR.mkdir(exist_ok=True)
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+PATHOGENS = ["AB", "BW", "DKO", "EF", "KP", "PA", "SA"]
+ESKAPE_RUNNER = (
+    "import sys;"
+    "sys.argv[0]='sklearn_predict';"
+    "from chemprop.sklearn_predict import sklearn_predict;"
+    "sys.exit(sklearn_predict())"
+)
 
 st.set_page_config(page_title="ChemTox Profiler", layout="wide")
 st.markdown("""
@@ -23,6 +30,7 @@ st.markdown("""
 .card-green { background: rgba(46, 125, 50, 0.15); border-left: 5px solid #2e7d32; }
 .card-red { background: rgba(198, 40, 40, 0.15); border-left: 5px solid #c62828; }
 .card-yellow { background: rgba(249, 168, 37, 0.15); border-left: 5px solid #f9a825; }
+.card-blue { background: rgba(25, 118, 210, 0.15); border-left: 5px solid #1976d2; }
 .card-gray { background: rgba(97, 97, 97, 0.15); border-left: 5px solid #616161; }
 .big { font-size: 42px; font-weight: 700; line-height: 1; }
 </style>
@@ -36,15 +44,15 @@ def ld50_mgkg(log_molkg, mw):
 def ghs_class(mg):
     if mg is None:
         return "—"
-    if mg < 5:
+    if mg <= 5:
         return "1 — смертельно"
-    if mg < 50:
+    if mg <= 50:
         return "2 — смертельно"
-    if mg < 300:
+    if mg <= 300:
         return "3 — токсично"
-    if mg < 2000:
+    if mg <= 2000:
         return "4 — вредно"
-    if mg < 5000:
+    if mg <= 5000:
         return "5 — малоопасно"
     return "> 5000 — нетоксично"
 
@@ -52,9 +60,9 @@ def ghs_class(mg):
 def color_for(mg):
     if mg is None:
         return "gray"
-    if mg < 300:
+    if mg <= 300:
         return "red"
-    if mg < 2000:
+    if mg <= 2000:
         return "yellow"
     return "green"
 
@@ -70,10 +78,15 @@ def mol_svg(mol, w=340, h=340):
     )
 
 
+@st.cache_resource(show_spinner=False)
+def get_admet_model():
+    from admet_ai import ADMETModel
+    return ADMETModel()
+
+
 def run_admet(smiles):
     try:
-        from admet_ai import ADMETModel
-        p = ADMETModel().predict(smiles=smiles)
+        p = get_admet_model().predict(smiles=smiles)
         keys = {"hERG": "hERG", "DILI": "DILI", "Ames": "AMES", "LD50": "LD50_Zhu"}
         out = {}
         for label, key in keys.items():
@@ -84,77 +97,67 @@ def run_admet(smiles):
         return {"error": str(e)}
 
 
+def predict_pathogen(csv_in, out_dir, db_dir, pathogen):
+    preds_path = out_dir / f"{pathogen}_rf.csv"
+    model_dir = db_dir / f"{pathogen}_rf"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", ESKAPE_RUNNER,
+             "--test_path", str(csv_in),
+             "--checkpoint_dir", str(model_dir),
+             "--preds_path", str(preds_path)],
+            cwd=str(WORKDIR),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            creationflags=NO_WINDOW,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            tail = tail[-3:] if tail else []
+            return pathogen, None, f"rc={proc.returncode}; " + " | ".join(tail)
+        if not preds_path.exists():
+            return pathogen, None, "файл предсказаний не создан"
+        df = pd.read_csv(preds_path)
+        if df.empty:
+            return pathogen, None, "пустой файл предсказаний"
+        return pathogen, float(df.iloc[0]["activity"]), None
+    except subprocess.TimeoutExpired:
+        return pathogen, None, "timeout 300s"
+    except Exception as e:
+        return pathogen, None, f"{type(e).__name__}: {e}"
+
+
 def run_eskape(smiles):
-    csv_in = ESKAPE_DIR / "input.csv"
-    pd.DataFrame({"smiles": [smiles]}).to_csv(csv_in, index=False)
-
-    for f in ESKAPE_DIR.glob("*"):
-        if f.name != "input.csv":
-            try:
-                f.unlink()
-            except Exception:
-                pass
-
-    pathogens = ["AB", "BW", "DKO", "EF", "KP", "PA", "SA"]
     results = {"rf": {}}
     db_dir = WORKDIR / "db" / "models" / "all"
-
-    if os.name == 'nt':
-        python_exe = str(WORKDIR / "python" / "python.exe")
-    else:
-        python_exe = sys.executable
-
-    runner = (
-        "import sys;"
-        "sys.argv[0]='sklearn_predict';"
-        "from chemprop.sklearn_predict import sklearn_predict;"
-        "sys.exit(sklearn_predict())"
-    )
-
     errors = []
-    for p in pathogens:
-        preds_path = ESKAPE_DIR / f"{p}_rf.csv"
-        model_dir = db_dir / f"{p}_rf"
-        try:
-            proc = subprocess.run(
-                [python_exe, "-c", runner,
-                 "--test_path", str(csv_in),
-                 "--checkpoint_dir", str(model_dir),
-                 "--preds_path", str(preds_path)],
-                cwd=str(WORKDIR),
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-                tail = tail[-3:] if tail else []
-                errors.append(f"{p}: rc={proc.returncode}; " + " | ".join(tail))
-                continue
-            if preds_path.exists():
-                df = pd.read_csv(preds_path)
-                if not df.empty:
-                    results["rf"][p] = float(df.iloc[0]["activity"])
-                else:
-                    errors.append(f"{p}: пустой файл предсказаний")
-            else:
-                errors.append(f"{p}: файл предсказаний не создан")
-        except subprocess.TimeoutExpired:
-            errors.append(f"{p}: timeout 300s")
-        except Exception as e:
-            errors.append(f"{p}: {type(e).__name__}: {e}")
 
-    return {"input.csv": {smiles: results}}, ("; ".join(errors) if errors else None)
+    with tempfile.TemporaryDirectory(prefix="chemtox_") as tmp:
+        out_dir = Path(tmp)
+        csv_in = out_dir / "input.csv"
+        pd.DataFrame({"smiles": [smiles]}).to_csv(csv_in, index=False)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(predict_pathogen, csv_in, out_dir, db_dir, p) for p in PATHOGENS]
+            for fut in futures:
+                pathogen, value, err = fut.result()
+                if err:
+                    errors.append(f"{pathogen}: {err}")
+                else:
+                    results["rf"][pathogen] = value
+
+    err_text = "; ".join(errors) if errors else None
+    if not results["rf"]:
+        return {}, err_text
+    return {"input.csv": {smiles: results}}, err_text
 
 
 def antifungal(mol):
     out = []
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("n1cncc1")):
-        out.append("Азольное кольцо")
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("C=C-C=C-C=C")):
-        out.append("Полиеновая система")
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("c[Cl,Br,F]")):
-        out.append("Галоген-ароматика")
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[CX4][nX3]1cncc1")) or mol.HasSubstructMatch(Chem.MolFromSmarts("[CX4][nX3]1cncn1")):
+        out.append("N-замещённый азол (имидазол / 1,2,4-триазол)")
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[CX3]=[CX3]-[CX3]=[CX3]-[CX3]=[CX3]-[CX3]=[CX3]")):
+        out.append("Полиеновая система (4+ сопряжённых связи)")
     return out
 
 
@@ -232,17 +235,33 @@ with c1:
     st.markdown(mol_svg(mol), unsafe_allow_html=True)
 with c2:
     st.markdown("#### Вердикт")
-    herg, dil = tox.get("hERG", 0), tox.get("DILI", 0)
-    max_esk = max(esk_merged.values()) if esk_merged else 0
+    herg = tox.get("hERG")
+    dil = tox.get("DILI")
+    ames = tox.get("Ames")
+    max_esk = max(esk_merged.values()) if esk_merged else None
     antif = antifungal(mol)
 
     def card(lbl, val, style):
         st.markdown(f'<div class="card card-{style}"><b>{lbl}:</b> {val}</div>', unsafe_allow_html=True)
 
-    card("Антибактериальная", "ДА" if max_esk >= 0.5 else "НЕТ", "red" if max_esk >= 0.5 else "green")
-    card("Антифунгальная", "МОЖЕТ БЫТЬ" if antif else "НЕТ", "yellow" if antif else "green")
-    card("Кардиориск (hERG)", f"{'ВЫСОКИЙ' if herg > 0.5 else 'НИЗКИЙ'} ({herg:.3f})", "red" if herg > 0.5 else "green")
-    card("Гепатотоксичность", f"{'ВЫСОКАЯ' if dil > 0.5 else 'НИЗКАЯ'} ({dil:.3f})", "red" if dil > 0.5 else "green")
+    def risk_card(lbl, value, high_text, low_text):
+        if value is None:
+            card(lbl, "не рассчитано", "gray")
+        elif value > 0.5:
+            card(lbl, f"{high_text} ({value:.3f})", "red")
+        else:
+            card(lbl, f"{low_text} ({value:.3f})", "green")
+
+    if max_esk is None:
+        card("Антибактериальная активность", "не рассчитано", "gray")
+    elif max_esk >= 0.5:
+        card("Антибактериальная активность", f"ВЕРОЯТНА ({max_esk:.3f})", "blue")
+    else:
+        card("Антибактериальная активность", f"НЕ ВЕРОЯТНА ({max_esk:.3f})", "gray")
+    card("Антифунгальные алерты", "ЕСТЬ" if antif else "не найдены", "yellow" if antif else "gray")
+    risk_card("Кардиориск (hERG)", herg, "ВЫСОКИЙ", "НИЗКИЙ")
+    risk_card("Гепатотоксичность", dil, "ВЫСОКАЯ", "НИЗКАЯ")
+    risk_card("Мутагенность (Ames)", ames, "ВЕРОЯТНА", "НЕ ВЕРОЯТНА")
 with c3:
     st.markdown("#### Свойства")
     st.dataframe(
@@ -255,12 +274,12 @@ c4, c5, c6 = st.columns([1, 1.4, 1.4])
 with c4:
     st.markdown("#### LD50")
     ld50_log = tox.get("LD50")
-    if ld50_log:
+    if ld50_log is not None:
         ld50 = ld50_mgkg(ld50_log, desc["MW"])
         col = color_for(ld50)
         st.markdown(
             f'<div class="card card-{col}" style="text-align:center">'
-            f'<div class="big">{ld50:.0f}</div><div>мг/кг (oral)</div>'
+            f'<div class="big">{ld50:.0f}</div><div>мг/кг (крыса, oral)</div>'
             f'<div style="font-weight:700;margin-top:8px">GHS {ghs_class(ld50)}</div></div>',
             unsafe_allow_html=True,
         )
@@ -268,6 +287,10 @@ with c4:
             st.markdown(f"**Оценка i.p.: {ld50 * 0.33:.0f} мг/кг**")
     elif "error" in tox:
         st.error(tox["error"])
+    if ref_oral > 0:
+        st.markdown(f"Справочное oral: **{ref_oral:.0f} мг/кг**")
+    if ref_ip > 0:
+        st.markdown(f"Справочное i.p.: **{ref_ip:.0f} мг/кг**")
 with c5:
     st.markdown("#### Токсичность")
     pk = [k for k in tox if k != "LD50" and k != "error"]
@@ -291,7 +314,7 @@ with c6:
         vals = [esk_merged[p] for p in paths]
         fig = go.Figure(go.Bar(
             x=vals, y=paths, orientation="h",
-            marker_color=["#d62728" if v > 0.5 else "#2ca02c" for v in vals],
+            marker_color=["#1976d2" if v > 0.5 else "#9e9e9e" for v in vals],
             text=[f"{v:.3f}" for v in vals], textposition="auto",
         ))
         fig.update_layout(
@@ -308,6 +331,11 @@ with c6:
         st.info("Нажмите 'Рассчитать всё'")
 
 if antif:
-    st.markdown("#### Противогрибковые мотивы")
+    st.markdown("#### Структурные алерты (не прогноз)")
     for a in antif:
         st.warning(a)
+
+st.caption(
+    "Расчёт in silico, не заменяет эксперимент. Для молекул, непохожих на обучающие выборки, "
+    "результаты менее надёжны. Значения LD50 — оценка порядка величины."
+)
