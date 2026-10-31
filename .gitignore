@@ -1,0 +1,7 @@
+venv/
+build_deb/
+*.deb
+__pycache__/
+*.pyc
+.vscode/
+.idea/
