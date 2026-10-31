@@ -23,19 +23,6 @@ say_ok()   { echo "$1"; }
 say_warn() { echo "!! $1"; }
 say_err()  { echo "XX $1"; }
 
-fetch() {
-    local url="$1" out="$2"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 5 --retry-delay 3 -o "$out.part" "$url" || { rm -f "$out.part"; return 1; }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$out.part" "$url" || { rm -f "$out.part"; return 1; }
-    else
-        say_err "Нужен curl или wget: sudo apt install curl"
-        return 1
-    fi
-    mv -f "$out.part" "$out"
-}
-
 is_lfs_pointer() {
     [ -f "$1" ] || return 1
     local sz
@@ -48,7 +35,7 @@ is_lfs_pointer() {
 list_lfs_pointers() {
     [ -d "db" ] || return 0
     find db -type f 2>/dev/null | while read -r f; do
-        if is_lfs_pointer "$f"; then echo "$f"; fi
+        is_lfs_pointer "$f" && echo "$f"
     done
 }
 
@@ -81,10 +68,6 @@ eskape_required_ok() {
 
 expand_eskape_zip() {
     local zip="$1"
-    if ! command -v unzip >/dev/null 2>&1; then
-        say_err "Не найден unzip: sudo apt install unzip"
-        return 1
-    fi
     say_step "Распаковка $zip"
     local tmp="_eskape_extract"
     rm -rf "$tmp"; mkdir -p "$tmp"
@@ -105,7 +88,11 @@ expand_eskape_zip() {
 download_eskape() {
     say_step "Скачивание ESKAPE с $ESKAPE_REPO (~3.5 ГБ)"
     local zip="eskape-main.zip"
-    fetch "$ESKAPE_REPO/archive/refs/heads/main.zip" "$zip"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --progress-bar -o "$zip" "$ESKAPE_REPO/archive/refs/heads/main.zip"
+    else
+        wget -O "$zip" "$ESKAPE_REPO/archive/refs/heads/main.zip"
+    fi
     expand_eskape_zip "$zip"
     rm -f "$zip"
 }
@@ -121,11 +108,12 @@ lfs_fill() {
         local rel="${f#./}"
         local url="$ESKAPE_LFS_BASE/$rel"
         echo "  $rel"
-        if fetch "$url" "$f"; then
-            if is_lfs_pointer "$f"; then say_err "  ПУСТО: $f"; err=$((err+1)); fi
+        if command -v curl >/dev/null 2>&1; then
+            curl -fL -o "$f" "$url" || { say_err "  ОШИБКА: $f"; err=$((err+1)); }
         else
-            say_err "  ОШИБКА: $f"; err=$((err+1))
+            wget -O "$f" "$url" || { say_err "  ОШИБКА: $f"; err=$((err+1)); }
         fi
+        if is_lfs_pointer "$f"; then say_err "  ПУСТО: $f"; err=$((err+1)); fi
     done <<< "$list"
     [ "$err" -eq 0 ] || say_warn "Не скачано: $err. Повторите ./install.sh"
 }

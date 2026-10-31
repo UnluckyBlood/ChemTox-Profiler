@@ -1,4 +1,3 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 rdkit
 pandas
 plotly
@@ -6,5 +5,5 @@ streamlit
 admet-ai
 scikit-learn==1.3.2
 numpy==1.26.4
-pywebview; sys_platform == "win32"
+pywebview
 chemprop<2

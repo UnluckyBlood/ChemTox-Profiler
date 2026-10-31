@@ -5,7 +5,6 @@
 # ============================================================
 
 $ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
 $WORKDIR = $PSScriptRoot
 Set-Location $WORKDIR
 
@@ -26,23 +25,6 @@ function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" -Foreground
 function Write-Ok($msg)   { Write-Host $msg -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
 function Write-Err($msg)  { Write-Host $msg -ForegroundColor Red }
-
-function Get-RemoteFile($url, $out) {
-    $part = "$out.part"
-    if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    try {
-        if ($curl) {
-            & $curl.Source -fL --retry 5 --retry-delay 3 -sS -o $part $url
-            if ($LASTEXITCODE -ne 0) { throw "Ошибка загрузки (код $LASTEXITCODE): $url" }
-        } else {
-            Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing
-        }
-        Move-Item -LiteralPath $part -Destination $out -Force
-    } finally {
-        if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
-    }
-}
 
 function Test-LFSPointer($path) {
     # Файл - LFS-заглушка, если маленький и начинается с сигнатуры git-lfs
@@ -121,7 +103,7 @@ function Invoke-EskapeDownload {
     # Скачивание свежего архива с GitHub
     $tmpZip = "eskape-main.zip"
     Write-Step "Скачивание ESKAPE с $ESKAPE_REPO (~3.5 ГБ)"
-    Get-RemoteFile "$ESKAPE_REPO/archive/refs/heads/main.zip" $tmpZip
+    Invoke-WebRequest -Uri "$ESKAPE_REPO/archive/refs/heads/main.zip" -OutFile $tmpZip -UseBasicParsing
     try { Expand-EskapeZip $tmpZip }
     finally { if (Test-Path $tmpZip) { Remove-Item $tmpZip -Force } }
 }
@@ -135,10 +117,10 @@ function Invoke-LfsFill {
     foreach ($f in $pointers) {
         $i++
         if ($i % 20 -eq 0 -or $i -eq $pointers.Count) { Write-Host "  [$i/$($pointers.Count)] $($f.Name)" }
-        $rel = $f.FullName.Substring($WORKDIR.Length + 1).Replace("\", "/")
+        $rel = $f.FullName.Substring($WORKDIR.Path.Length + 1).Replace("\", "/")
         $url = "$ESKAPE_LFS_BASE/$rel"
         try {
-            Get-RemoteFile $url ($f.FullName)
+            Invoke-WebRequest -Uri $url -OutFile $f.FullName -UseBasicParsing -ErrorAction Stop
             if (Test-LFSPointer $f.FullName) { Write-Err "  ПУСТО: $($f.Name)"; $errors += $f.Name }
         } catch {
             Write-Err "  ОШИБКА: $($f.Name) - $_"; $errors += $f.Name
@@ -156,13 +138,13 @@ Write-Host ""
 # --- Шаг 1: Python ---
 if (-not (Test-Path "python\python.exe")) {
     Write-Step "Скачивание Python $PY_VERSION"
-    Get-RemoteFile $PY_URL "python.zip"
+    Invoke-WebRequest -Uri $PY_URL -OutFile "python.zip" -UseBasicParsing
     Expand-Archive -Path "python.zip" -DestinationPath "python" -Force
     Remove-Item "python.zip"
     $pth = Get-ChildItem "python\python*._pth" | Select-Object -First 1
     (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' | Set-Content $pth.FullName
     Write-Step "Установка pip"
-    Get-RemoteFile $GET_PIP_URL "get-pip.py"
+    Invoke-WebRequest -Uri $GET_PIP_URL -OutFile "get-pip.py" -UseBasicParsing
     & ".\python\python.exe" "get-pip.py"
     Remove-Item "get-pip.py"
 } else {
@@ -209,33 +191,12 @@ if ($opt.Count -eq 0) {
     Write-Host "а streamlit_app.py использует только _rf. Пропускаю."
 }
 
-function Create-Shortcuts {
-    $WshShell = New-Object -ComObject WScript.Shell
-    $desktop   = [Environment]::GetFolderPath("Desktop")
-    $startMenu = [Environment]::GetFolderPath("Programs")
-    $target    = Join-Path $WORKDIR "python\pythonw.exe"
-    $argLine   = "`"$(Join-Path $WORKDIR 'launcher.py')`""
-    $icon      = Join-Path $WORKDIR "app.ico"
-    if (-not (Test-Path $icon)) { $icon = $target }
-    foreach ($dir in @($desktop, $startMenu)) {
-        $lnk = Join-Path $dir "ChemTox Profiler.lnk"
-        $sc = $WshShell.CreateShortcut($lnk)
-        $sc.TargetPath       = $target
-        $sc.Arguments        = $argLine
-        $sc.WorkingDirectory = $WORKDIR
-        $sc.IconLocation     = $icon
-        $sc.Save()
-    }
-    Write-Ok "Ярлыки созданы на рабочем столе и в меню Пуск"
-}
-
 # --- Финальный отчёт ---
 Write-Host ""
 Write-Host "=========================================="
 if (Test-EskapeRequiredOk) {
-    Create-Shortcuts
     Write-Ok " Готово! ESKAPE: 7/7 RF-моделей, LFS на месте"
-    Write-Ok " Запускайте ChemTox Profiler с рабочего стола"
+    Write-Ok " Запускайте launch.bat"
 } else {
     $stillReq = Get-MissingRequired
     $stillLfs = Get-LfsPointers

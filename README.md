@@ -1,57 +1,44 @@
-# ChemTox Profiler v1.2.0
+# ChemTox Profiler v1.1.0
 
 Десктопное приложение для прогнозирования токсичности (ADMET-AI) и антибактериальной активности (ESKAPE, Random Forest) по SMILES-строке.
 
-Расчёты выполняются in silico и не заменяют эксперимент. Для молекул, непохожих на обучающие выборки, результаты менее надёжны.
+## Запуск на Windows
 
-## Windows
+В проекте используется изолированный портативный Python. Вам не нужно устанавливать зависимости в систему.
 
-### Через установщик (рекомендуется)
-В разделе Releases доступны два установщика:
-- `ChemTox-Profiler-Offline-Setup.exe` — содержит Python и модели, интернет не нужен.
-- `ChemTox-Profiler-Online-Setup.exe` — после установки скачивает портативный Python, библиотеки и модели ESKAPE.
+### Способ 1: Через скрипт-обертку (рекомендуется)
+1. Откройте командную строку (cmd) или PowerShell в папке проекта.
+2. Выполните: `python start.py`
+Скрипт найдет портативный Python и запустит программу в отдельном нативном окне.
 
-После установки запускайте программу с ярлыка на рабочем столе или из меню Пуск.
+### Способ 2: Прямой запуск
+Если вы хотите запустить приложение напрямую, используйте только портативный Python из папки проекта:
+`python\pythonw.exe launcher.py`
 
-### Из исходников
-1. Запустите `install.bat` — он скачает портативный Python 3.10, библиотеки и модели и создаст ярлыки.
-2. Запускайте через ярлык или `launch.bat`.
+## Запуск на Linux (Debian/Ubuntu)
 
-Прямой запуск: `python\pythonw.exe launcher.py`
+Для работы на Linux требуются системные библиотеки для графического интерфейса и сборки пакетов.
 
-Журнал работы: `%LOCALAPPDATA%\ChemTox Profiler\chemtox.log`
-
-## Linux (Debian/Ubuntu)
-
-Системные пакеты:
-
+### Подготовка системы
+Откройте терминал и установите зависимости:
 `sudo apt update`
-`sudo apt install python3 python3-venv python3-pip build-essential libgl1 curl unzip`
+`sudo apt install python3 python3-venv python3-pip build-essential libgirepository1.0-dev gobject-introspection libcairo2-dev pkg-config libgl1`
 
-Установка и запуск:
-1. `./install.sh` — создаёт `venv`, ставит библиотеки и скачивает модели.
-2. `./launch.sh` — запускает приложение, оно откроется в браузере по адресу http://localhost:8501.
-
-`python3 start.py` делает то же самое: при первом запуске вызывает `install.sh`, затем запускает приложение.
+### Запуск
+1. Перейдите в папку с проектом.
+2. Выполните: `python3 start.py`
+Скрипт создаст виртуальное окружение `venv`, установит все библиотеки из `requirements.txt` и запустит приложение. При последующих запусках установка выполняться не будет.
 
 ## Структура проекта
-- `install.bat`, `setup.ps1` — установка на Windows
-- `install.sh` — установка на Linux
-- `launch.bat`, `launch.sh` — запуск
-- `start.py` — универсальный скрипт: установка при необходимости и запуск
-- `launcher.py` — точка входа для Windows (окно pywebview)
-- `streamlit_app.py` — интерфейс и логика расчётов
-- `requirements.txt` — зависимости
-- `setup_offline.iss`, `setup_online.iss`, `version.iss` — сборка установщиков (Inno Setup)
-- `python/` — портативный Python 3.10 (только Windows)
-- `db/` — модели Random Forest
+- `start.py` - Универсальный скрипт запуска
+- `launcher.py` - Точка входа для Windows (pywebview окно)
+- `streamlit_app.py` - Графический интерфейс и логика расчетов
+- `python/` - Портативный Python 3.10 (только для Windows)
+- `db/` - Веса моделей Random Forest и канонические данные
+- `requirements.txt` - Зависимости для Linux
 
 ## Функционал
-- Прогноз токсичности (ADMET-AI): hERG, DILI, Ames, LD50 (мг/кг, крыса, перорально, и класс GHS).
-- Прогноз антибактериальной активности: 7 моделей Random Forest (AB, BW, DKO, EF, KP, PA, SA).
-- Поиск структурных алертов противогрибковых классов (азолы, полиены). Это не прогноз активности.
-- Физико-химические дескрипторы (MW, LogP, TPSA, H-доноры, H-акцепторы).
-
-## Источники
-- ADMET-AI: https://github.com/swansonk14/admet_ai
-- ESKAPE-модели: https://github.com/arnolp3/The-ESKAPE-Model
+- Прогноз токсичности (ADMET-AI): hERG, DILI, Ames, LD50 (мг/кг и GHS).
+- Прогноз антибактериальной активности (ESKAPE): 7 приоритетных патогенов.
+- Поиск противогрибковых SMARTS-паттернов.
+- Расчет физико-химических дескрипторов (MW, LogP, TPSA).
