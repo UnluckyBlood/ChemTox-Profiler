@@ -191,12 +191,33 @@ if ($opt.Count -eq 0) {
     Write-Host "а streamlit_app.py использует только _rf. Пропускаю."
 }
 
+function Create-Shortcuts {
+    $WshShell = New-Object -ComObject WScript.Shell
+    $desktop   = [Environment]::GetFolderPath("Desktop")
+    $startMenu = [Environment]::GetFolderPath("Programs")
+    $target    = Join-Path $WORKDIR "python\pythonw.exe"
+    $argLine   = "`"$(Join-Path $WORKDIR 'launcher.py')`""
+    $icon      = Join-Path $WORKDIR "app.ico"
+    if (-not (Test-Path $icon)) { $icon = $target }
+    foreach ($dir in @($desktop, $startMenu)) {
+        $lnk = Join-Path $dir "ChemTox Profiler.lnk"
+        $sc = $WshShell.CreateShortcut($lnk)
+        $sc.TargetPath       = $target
+        $sc.Arguments        = $argLine
+        $sc.WorkingDirectory = $WORKDIR
+        $sc.IconLocation     = $icon
+        $sc.Save()
+    }
+    Write-Ok "Ярлыки созданы на рабочем столе и в меню Пуск"
+}
+
 # --- Финальный отчёт ---
 Write-Host ""
 Write-Host "=========================================="
 if (Test-EskapeRequiredOk) {
+    Create-Shortcuts
     Write-Ok " Готово! ESKAPE: 7/7 RF-моделей, LFS на месте"
-    Write-Ok " Запускайте launch.bat"
+    Write-Ok " Запускайте ChemTox Profiler с рабочего стола"
 } else {
     $stillReq = Get-MissingRequired
     $stillLfs = Get-LfsPointers

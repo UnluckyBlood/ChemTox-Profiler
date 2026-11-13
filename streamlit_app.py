@@ -147,6 +147,29 @@ def run_eskape(smiles):
     return {"input.csv": {smiles: results}}, ("; ".join(errors) if errors else None)
 
 
+@st.cache_resource(show_spinner="Загрузка модели биоактивности (при первом запуске скачивается ~10 МБ)...")
+def get_activity_profiler():
+    # Исключения намеренно не перехватываются: Streamlit не кэширует неудачу,
+    # и при следующем нажатии загрузка повторится (например, когда появится интернет).
+    import activity_profiler as ap
+    model_dir = DB_PATH / "models" / "chembl"
+    ap.download_model(model_dir, ap.MODEL_BASE_URL)
+    return ap.Profiler(model_dir, ap.ACTIVITY_GROUPS)
+
+
+def run_activity(mol):
+    """Возвращает (результаты по классам | {}, текст ошибки | None)."""
+    try:
+        import activity_profiler as ap
+        prof = get_activity_profiler()
+        _, res = prof.profile(ap.standardize(mol))
+        return res, None
+    except ImportError as e:
+        return {}, f"не установлен onnxruntime: {e}"
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {e}"
+
+
 def antifungal(mol):
     out = []
     if mol.HasSubstructMatch(Chem.MolFromSmarts("n1cncc1")):
@@ -187,14 +210,20 @@ if 'current_smiles' not in st.session_state or st.session_state['current_smiles'
     st.session_state['esk'] = {}
     st.session_state['esk_err'] = None
     st.session_state['tox'] = {}
+    st.session_state['act'] = {}
+    st.session_state['act_err'] = None
 
 if calc_btn:
-    with st.status("1/2: Расчет токсичности (ADMET-AI)...", expanded=True) as status:
+    with st.status("1/3: Расчет токсичности (ADMET-AI)...", expanded=True) as status:
         st.session_state['tox'] = run_admet(smiles)
-        status.update(label="2/2: Расчет ESKAPE (RF)...", state="running")
+        status.update(label="2/3: Расчет ESKAPE (RF)...", state="running")
         esk_data, esk_err = run_eskape(smiles)
         st.session_state['esk'] = esk_data
         st.session_state['esk_err'] = esk_err
+        status.update(label="3/3: Профиль биоактивности (ChEMBL)...", state="running")
+        act_res, act_err = run_activity(mol)
+        st.session_state['act'] = act_res
+        st.session_state['act_err'] = act_err
         if esk_data:
             status.update(label="Готово", state="complete", expanded=False)
         else:
@@ -204,6 +233,8 @@ if calc_btn:
 tox = st.session_state.get('tox', {})
 esk = st.session_state.get('esk', {})
 esk_err = st.session_state.get('esk_err')
+act = st.session_state.get('act', {})
+act_err = st.session_state.get('act_err')
 
 esk_merged = {}
 if esk:
@@ -243,6 +274,13 @@ with c2:
     card("Антифунгальная", "МОЖЕТ БЫТЬ" if antif else "НЕТ", "yellow" if antif else "green")
     card("Кардиориск (hERG)", f"{'ВЫСОКИЙ' if herg > 0.5 else 'НИЗКИЙ'} ({herg:.3f})", "red" if herg > 0.5 else "green")
     card("Гепатотоксичность", f"{'ВЫСОКАЯ' if dil > 0.5 else 'НИЗКАЯ'} ({dil:.3f})", "red" if dil > 0.5 else "green")
+    ai = act.get("Противовоспалительная")
+    if ai:
+        card(
+            "Противовоспалительная",
+            f"{ai['level'].upper()} ({ai['p']:.2f}, {ai['best_name']})",
+            {"высокая": "red", "средняя": "yellow"}.get(ai["level"], "green"),
+        )
 with c3:
     st.markdown("#### Свойства")
     st.dataframe(
@@ -306,6 +344,46 @@ with c6:
         st.error(f"Ошибка ESKAPE: {esk_err}")
     else:
         st.info("Нажмите 'Рассчитать всё'")
+
+st.markdown("#### Профиль биоактивности (ChEMBL multitask)")
+if act:
+    LEVEL_COLORS = {"высокая": "#d62728", "средняя": "#f9a825", "низкая": "#2ca02c"}
+    groups_sorted = sorted(act, key=lambda g: act[g]["p"])
+    c7, c8 = st.columns([1.2, 1.8])
+    with c7:
+        fig = go.Figure(go.Bar(
+            x=[act[g]["p"] for g in groups_sorted], y=groups_sorted, orientation="h",
+            marker_color=[LEVEL_COLORS[act[g]["level"]] for g in groups_sorted],
+            text=[f"{act[g]['p']:.2f}" for g in groups_sorted], textposition="auto",
+        ))
+        fig.update_layout(
+            xaxis_range=[0, 1], height=420,
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with c8:
+        st.dataframe(
+            pd.DataFrame({
+                "Класс": list(reversed(groups_sorted)),
+                "p": [round(act[g]["p"], 2) for g in reversed(groups_sorted)],
+                "Процентиль": [round(act[g]["pct"], 2) for g in reversed(groups_sorted)],
+                "Уровень": [act[g]["level"] for g in reversed(groups_sorted)],
+                "Топ-3 мишени (p)": [act[g]["top"] for g in reversed(groups_sorted)],
+            }),
+            use_container_width=True, hide_index=True, height=420,
+        )
+    st.caption(
+        "p — вероятность того, что молекула сильный лиганд хотя бы одной мишени класса "
+        "(модель ChEMBL Multitask, 2D-отпечатки). Это механистическая гипотеза, а не клинический "
+        "эффект и не «Pa» из PASS. Процентиль — положение среди ~50 эталонных лекарств: "
+        "значения p при низком процентиле часто «фон». Слабые (мкМ) соединения, например "
+        "ибупрофен, модель занижает; возможны и ложные срабатывания, поэтому смотрите на мишени."
+    )
+elif act_err:
+    st.error(f"Ошибка профиля биоактивности: {act_err}")
+else:
+    st.info("Нажмите 'Рассчитать всё'")
 
 if antif:
     st.markdown("#### Противогрибковые мотивы")
